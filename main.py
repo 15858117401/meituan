@@ -58,7 +58,7 @@ PROFILES = (
         "wants": ("Python", "数据分析"),
         "time": "周三晚 / 周末下午",
         "color": "#dfff45",
-        "reliability": 0.96,
+        "activity": 0.96,
     },
     {
         "id": "u-chen",
@@ -69,7 +69,7 @@ PROFILES = (
         "wants": ("Python", "摄影"),
         "time": "工作日晚 20:00 后",
         "color": "#6ee7cf",
-        "reliability": 0.92,
+        "activity": 0.82,
     },
     {
         "id": "u-zhou",
@@ -80,7 +80,7 @@ PROFILES = (
         "wants": ("Python", "英语口语"),
         "time": "周六、周日上午",
         "color": "#ffb86b",
-        "reliability": 0.89,
+        "activity": 0.70,
     },
     {
         "id": "u-shao",
@@ -91,7 +91,7 @@ PROFILES = (
         "wants": ("摄影", "英语口语"),
         "time": "周二、周四晚",
         "color": "#b7a3ff",
-        "reliability": 0.91,
+        "activity": 0.88,
     },
     {
         "id": "u-qin",
@@ -102,7 +102,7 @@ PROFILES = (
         "wants": ("摄影", "Python"),
         "time": "周末全天",
         "color": "#ff93b3",
-        "reliability": 0.87,
+        "activity": 0.76,
     },
     {
         "id": "u-gu",
@@ -113,7 +113,7 @@ PROFILES = (
         "wants": ("英语口语", "Python"),
         "time": "工作日午休 / 周日",
         "color": "#91bfff",
-        "reliability": 0.86,
+        "activity": 0.72,
     },
 )
 
@@ -149,7 +149,7 @@ def rank_matches(teach: str, learn: str, limit: int = 3) -> list[dict[str, objec
         offered_skill, offer_score = best_skill(learn, profile["teaches"])
         wanted_skill, want_score = best_skill(teach, profile["wants"])
         reciprocal_score = round(
-            100 * (0.52 * offer_score + 0.40 * want_score + 0.08 * profile["reliability"])
+            100 * (0.42 * offer_score + 0.33 * want_score + 0.25 * profile["activity"])
         )
         if reciprocal_score < 45:
             continue
@@ -165,6 +165,11 @@ def rank_matches(teach: str, learn: str, limit: int = 3) -> list[dict[str, objec
                 "teaches": offered_skill,
                 "wants": wanted_skill,
                 "is_reciprocal": offer_score >= 0.8 and want_score >= 0.8,
+                "score_breakdown": {
+                    "can_teach": round(offer_score * 100),
+                    "wants_to_learn": round(want_score * 100),
+                    "recent_activity": round(profile["activity"] * 100),
+                },
             }
         )
     ranked.sort(key=lambda item: (item["is_reciprocal"], item["score"]), reverse=True)
