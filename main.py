@@ -1,8 +1,202 @@
-from fastapi import FastAPI
+import re
+import uuid
+from datetime import UTC, datetime
+from difflib import SequenceMatcher
+
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field, field_validator
 
 
 app = FastAPI(title="技换 SkillSwap")
+
+
+class MatchRequest(BaseModel):
+    teach: str = Field(min_length=1, max_length=24)
+    learn: str = Field(min_length=1, max_length=24)
+
+    @field_validator("teach", "learn")
+    @classmethod
+    def clean_skill(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("技能不能为空")
+        return cleaned
+
+
+class ExchangeCreate(BaseModel):
+    match_id: str = Field(min_length=1, max_length=32)
+    teach: str = Field(min_length=1, max_length=24)
+    learn: str = Field(min_length=1, max_length=24)
+
+
+SKILL_ALIASES = {
+    "python入门": "python",
+    "python编程": "python",
+    "编程": "python",
+    "民谣吉他": "吉他",
+    "弹吉他": "吉他",
+    "短视频剪辑": "视频剪辑",
+    "剪映": "视频剪辑",
+    "剪辑": "视频剪辑",
+    "人像摄影": "摄影",
+    "拍照": "摄影",
+    "英语口语": "英语",
+    "口语": "英语",
+    "健身训练": "健身",
+    "力量训练": "健身",
+}
+
+
+PROFILES = (
+    {
+        "id": "u-lin",
+        "name": "林知夏",
+        "initial": "林",
+        "city": "上海 · 3.2km",
+        "teaches": ("民谣吉他", "摄影"),
+        "wants": ("Python", "数据分析"),
+        "time": "周三晚 / 周末下午",
+        "color": "#dfff45",
+        "reliability": 0.96,
+    },
+    {
+        "id": "u-chen",
+        "name": "陈一帆",
+        "initial": "陈",
+        "city": "线上交换",
+        "teaches": ("吉他", "视频剪辑"),
+        "wants": ("Python", "摄影"),
+        "time": "工作日晚 20:00 后",
+        "color": "#6ee7cf",
+        "reliability": 0.92,
+    },
+    {
+        "id": "u-zhou",
+        "name": "周可然",
+        "initial": "周",
+        "city": "同城 · 5.8km",
+        "teaches": ("吉他", "健身"),
+        "wants": ("Python", "英语口语"),
+        "time": "周六、周日上午",
+        "color": "#ffb86b",
+        "reliability": 0.89,
+    },
+    {
+        "id": "u-shao",
+        "name": "邵雨辰",
+        "initial": "邵",
+        "city": "线上交换",
+        "teaches": ("视频剪辑", "健身"),
+        "wants": ("摄影", "英语口语"),
+        "time": "周二、周四晚",
+        "color": "#b7a3ff",
+        "reliability": 0.91,
+    },
+    {
+        "id": "u-qin",
+        "name": "秦悦",
+        "initial": "秦",
+        "city": "同城 · 7.1km",
+        "teaches": ("视频剪辑", "吉他"),
+        "wants": ("摄影", "Python"),
+        "time": "周末全天",
+        "color": "#ff93b3",
+        "reliability": 0.87,
+    },
+    {
+        "id": "u-gu",
+        "name": "顾闻",
+        "initial": "顾",
+        "city": "线上交换",
+        "teaches": ("健身", "视频剪辑"),
+        "wants": ("英语口语", "Python"),
+        "time": "工作日午休 / 周日",
+        "color": "#91bfff",
+        "reliability": 0.86,
+    },
+)
+
+
+def canonical_skill(value: str) -> str:
+    compact = re.sub(r"[\s\-_，,。.!！?？]+", "", value).lower()
+    if compact in SKILL_ALIASES:
+        return SKILL_ALIASES[compact]
+    for alias, canonical in SKILL_ALIASES.items():
+        if alias in compact or compact in alias:
+            return canonical
+    return compact
+
+
+def skill_similarity(first: str, second: str) -> float:
+    left, right = canonical_skill(first), canonical_skill(second)
+    if left == right:
+        return 1.0
+    if left in right or right in left:
+        return 0.88
+    ratio = SequenceMatcher(None, left, right).ratio()
+    return ratio if ratio >= 0.5 else 0.0
+
+
+def best_skill(target: str, options: tuple[str, ...]) -> tuple[str, float]:
+    ranked = [(option, skill_similarity(target, option)) for option in options]
+    return max(ranked, key=lambda item: item[1])
+
+
+def rank_matches(teach: str, learn: str, limit: int = 3) -> list[dict[str, object]]:
+    ranked: list[dict[str, object]] = []
+    for profile in PROFILES:
+        offered_skill, offer_score = best_skill(learn, profile["teaches"])
+        wanted_skill, want_score = best_skill(teach, profile["wants"])
+        reciprocal_score = round(
+            100 * (0.52 * offer_score + 0.40 * want_score + 0.08 * profile["reliability"])
+        )
+        if reciprocal_score < 45:
+            continue
+        ranked.append(
+            {
+                "id": profile["id"],
+                "name": profile["name"],
+                "initial": profile["initial"],
+                "city": profile["city"],
+                "score": min(reciprocal_score, 99),
+                "time": profile["time"],
+                "color": profile["color"],
+                "teaches": offered_skill,
+                "wants": wanted_skill,
+                "is_reciprocal": offer_score >= 0.8 and want_score >= 0.8,
+            }
+        )
+    ranked.sort(key=lambda item: (item["is_reciprocal"], item["score"]), reverse=True)
+    return ranked[:limit]
+
+
+@app.post("/api/matches")
+async def match_skills(request: MatchRequest) -> dict[str, object]:
+    if canonical_skill(request.teach) == canonical_skill(request.learn):
+        raise HTTPException(status_code=422, detail="请填写两个不同的技能")
+    matches = rank_matches(request.teach, request.learn)
+    return {
+        "query": {"teach": request.teach, "learn": request.learn},
+        "count": len(matches),
+        "matches": matches,
+        "strategy": "reciprocal_skill_match_v1",
+    }
+
+
+@app.post("/api/exchanges", status_code=201)
+async def create_exchange(request: ExchangeCreate) -> dict[str, str]:
+    profile = next((item for item in PROFILES if item["id"] == request.match_id), None)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="匹配用户不存在")
+    if canonical_skill(request.teach) == canonical_skill(request.learn):
+        raise HTTPException(status_code=422, detail="交换技能不能相同")
+    return {
+        "request_id": f"SWAP-{uuid.uuid4().hex[:8].upper()}",
+        "status": "pending",
+        "partner_name": str(profile["name"]),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
 
 
 PAGE = r"""<!doctype html>
@@ -330,6 +524,16 @@ PAGE = r"""<!doctype html>
     .result-count { flex: 0 0 auto; color: var(--accent); font-size: .9rem; font-weight: 700; }
     .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
 
+    .empty-state {
+      grid-column: 1 / -1;
+      padding: 38px 24px;
+      border: 1px dashed #465044;
+      border-radius: 20px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, .02);
+      text-align: center;
+    }
+
     .card {
       min-width: 0;
       padding: 24px;
@@ -557,7 +761,7 @@ PAGE = r"""<!doctype html>
           <h2 id="results-title">为你找到这些交换者</h2>
           <p class="results-copy" id="results-copy">根据技能互补度与可约时间排序</p>
         </div>
-        <span class="result-count">3 个高匹配结果</span>
+        <span class="result-count" id="result-count">3 个高匹配结果</span>
       </div>
       <div class="cards" id="cards"></div>
     </section>
@@ -583,16 +787,11 @@ PAGE = r"""<!doctype html>
     const matchButton = document.querySelector('#match-button');
     const results = document.querySelector('#results');
     const resultsCopy = document.querySelector('#results-copy');
+    const resultCount = document.querySelector('#result-count');
     const cards = document.querySelector('#cards');
     const dialog = document.querySelector('#success-dialog');
     const dialogCopy = document.querySelector('#dialog-copy');
     const toast = document.querySelector('#toast');
-
-    const people = [
-      { name: '林知夏', initial: '林', city: '上海 · 3.2km', score: 96, time: '周三晚 / 周末下午', color: '#dfff45' },
-      { name: '陈一帆', initial: '陈', city: '线上交换', score: 92, time: '工作日晚 20:00 后', color: '#6ee7cf' },
-      { name: '周可然', initial: '周', city: '同城 · 5.8km', score: 88, time: '周六、周日上午', color: '#ffb86b' }
-    ];
 
     document.querySelectorAll('.chip').forEach((chip) => {
       chip.addEventListener('click', () => {
@@ -630,10 +829,10 @@ PAGE = r"""<!doctype html>
       trade.className = 'trade';
       const teaching = document.createElement('div');
       teaching.className = 'trade-row';
-      teaching.append(makeText('span', 'trade-key', 'TA 能教'), makeText('span', 'trade-value', learn));
+      teaching.append(makeText('span', 'trade-key', 'TA 能教'), makeText('span', 'trade-value', person.teaches));
       const learning = document.createElement('div');
       learning.className = 'trade-row';
-      learning.append(makeText('span', 'trade-key', 'TA 想学'), makeText('span', 'trade-value learn', teach));
+      learning.append(makeText('span', 'trade-key', 'TA 想学'), makeText('span', 'trade-value learn', person.wants));
       trade.append(teaching, learning);
 
       const availability = document.createElement('div');
@@ -643,10 +842,26 @@ PAGE = r"""<!doctype html>
 
       const button = makeText('button', 'exchange-button', '发起交换');
       button.type = 'button';
-      button.addEventListener('click', () => {
-        dialogCopy.textContent = `已向 ${person.name} 发出「${teach} ⇄ ${learn}」交换邀请。`;
-        if (typeof dialog.showModal === 'function') dialog.showModal();
-        else window.alert(dialogCopy.textContent);
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        button.textContent = '发送中…';
+        try {
+          const response = await fetch('/api/exchanges', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ match_id: person.id, teach, learn })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || '邀请发送失败，请稍后重试');
+          dialogCopy.textContent = `已向 ${payload.partner_name} 发出「${teach} ⇄ ${learn}」交换邀请，编号 ${payload.request_id}。`;
+          if (typeof dialog.showModal === 'function') dialog.showModal();
+          else window.alert(dialogCopy.textContent);
+        } catch (error) {
+          showToast(error.message || '邀请发送失败，请稍后重试');
+        } finally {
+          button.disabled = false;
+          button.textContent = '发起交换';
+        }
       });
 
       card.append(top, trade, availability, button);
@@ -659,7 +874,7 @@ PAGE = r"""<!doctype html>
       window.setTimeout(() => toast.classList.remove('show'), 2400);
     }
 
-    form.addEventListener('submit', (event) => {
+    form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const teach = teachInput.value.trim();
       const learn = learnInput.value.trim();
@@ -681,16 +896,32 @@ PAGE = r"""<!doctype html>
       matchButton.disabled = true;
       matchButton.querySelector('span').textContent = '正在匹配';
 
-      window.setTimeout(() => {
-        cards.replaceChildren(...people.map((person) => createCard(person, teach, learn)));
+      try {
+        const response = await fetch('/api/matches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ teach, learn })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || '匹配服务暂时不可用');
+
+        if (payload.matches.length) {
+          cards.replaceChildren(...payload.matches.map((person) => createCard(person, teach, learn)));
+        } else {
+          cards.replaceChildren(makeText('div', 'empty-state', '暂时没有合适的互换伙伴，换一个更具体的技能试试。'));
+        }
         resultsCopy.textContent = `正在寻找能教「${learn}」、想学「${teach}」的人`;
+        resultCount.textContent = payload.count ? `${payload.count} 个匹配结果` : '等待新的技能组合';
         results.classList.add('visible');
+        showToast(payload.count ? `已找到 ${payload.count} 位匹配交换者` : '这组技能暂时没有匹配');
+        results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (error) {
+        errorBox.textContent = error.message || '匹配服务暂时不可用，请稍后重试。';
+      } finally {
         matchButton.removeAttribute('aria-busy');
         matchButton.disabled = false;
-        matchButton.querySelector('span').textContent = '重新匹配';
-        showToast('已找到 3 位高匹配交换者');
-        results.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 650);
+        matchButton.querySelector('span').textContent = results.classList.contains('visible') ? '重新匹配' : '智能匹配';
+      }
     });
 
     document.querySelector('#close-dialog').addEventListener('click', () => dialog.close());
