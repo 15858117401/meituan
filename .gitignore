@@ -1,0 +1,8 @@
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.vercel/
+.env
+.env.*
+test_main.http
